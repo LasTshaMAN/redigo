@@ -299,12 +299,14 @@ func (p *Pool) lazyInit() {
 	p.mu.Unlock()
 }
 
-// get prunes stale connections and returns a connection from the idle list or
-// creates a new connection.
-func (p *Pool) get(ctx context.Context) (*poolConn, error) {
-
-	// Handle limit for p.Wait == true.
-	var waited time.Duration
+// waitVacantConn waits while at least one vacant connection appears in the pool.
+// If `ctx` expires before that, an error is returned.
+//
+// waitVacantConn returns:
+// - (as its first return value) the time it spent waiting, if there were no vacant connection in the pool right away
+// or zero otherwise
+// - (as its second return value) error, if any
+func (p *Pool) waitVacantConn(ctx context.Context) (time.Duration, error) {
 	if p.Wait && p.MaxActive > 0 {
 		p.lazyInit()
 
@@ -315,18 +317,38 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 		if wait {
 			start = time.Now()
 		}
+
 		if ctx == nil {
 			<-p.ch
 		} else {
 			select {
 			case <-p.ch:
+				// Additionally check that context hasn't expired while we were waiting,
+				// because `select` picks a random `case` if several of them are "ready".
+				select {
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return 0, ctx.Err()
 			}
 		}
+
 		if wait {
-			waited = time.Since(start)
+			return time.Since(start), nil
 		}
+	}
+	return 0, nil
+}
+
+// get prunes stale connections and returns a connection from the idle list or
+// creates a new connection.
+func (p *Pool) get(ctx context.Context) (*poolConn, error) {
+
+	// Wait while there is a vacant connection in the pool.
+	waited, err := p.waitVacantConn(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	p.mu.Lock()
