@@ -307,36 +307,41 @@ func (p *Pool) lazyInit() {
 // or zero otherwise
 // - (as its second return value) error, if any
 func (p *Pool) waitVacantConn(ctx context.Context) (time.Duration, error) {
-	if p.Wait && p.MaxActive > 0 {
-		p.lazyInit()
+	if !p.Wait {
+		return 0, nil
+	}
+	if p.MaxActive <= 0 {
+		return 0, nil
+	}
 
-		// wait indicates if we believe it will block so its not 100% accurate
-		// however for stats it should be good enough.
-		wait := len(p.ch) == 0
-		var start time.Time
-		if wait {
-			start = time.Now()
-		}
+	p.lazyInit()
 
-		if ctx == nil {
-			<-p.ch
-		} else {
+	// wait indicates if we believe it will block so its not 100% accurate
+	// however for stats it should be good enough.
+	wait := len(p.ch) == 0
+	var start time.Time
+	if wait {
+		start = time.Now()
+	}
+
+	if ctx == nil {
+		<-p.ch
+	} else {
+		select {
+		case <-p.ch:
+			// Additionally check that context hasn't expired while we were waiting,
+			// because `select` picks a random `case` if several of them are "ready".
 			select {
-			case <-p.ch:
-				// Additionally check that context hasn't expired while we were waiting,
-				// because `select` picks a random `case` if several of them are "ready".
-				select {
-				case <-ctx.Done():
-					return 0, ctx.Err()
-				}
 			case <-ctx.Done():
 				return 0, ctx.Err()
 			}
+		case <-ctx.Done():
+			return 0, ctx.Err()
 		}
+	}
 
-		if wait {
-			return time.Since(start), nil
-		}
+	if wait {
+		return time.Since(start), nil
 	}
 	return 0, nil
 }
